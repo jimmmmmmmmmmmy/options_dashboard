@@ -13,16 +13,13 @@ from lib.gbm import gbm_sim
 from lib.stats import get_hist_volatility, prob_cone, get_prob
 
 def register_callbacks(app, API_KEY):
-
     @app.callback(
         Output("ticker_table_collapse_content", "is_open"),
         [Input("ticker_data", "n_clicks")],
         [State("ticker_table_collapse_content", "is_open")],
     )
     def toggle_collapse(n, is_open):
-        if n:
-            return not is_open
-        return is_open
+        return not is_open if n else is_open
 
     @app.callback(
         Output('memory-ticker', 'options'),
@@ -81,29 +78,31 @@ def register_callbacks(app, API_KEY):
         stock_price = quotes_data[ticker]['lastPrice']
 
         for option_chain_type in ['call', 'put']:
-            exp_date_map = json_data[f'{option_chain_type}ExpDateMap']
-            for exp_date, strikes in exp_date_map.items():
+            exp_map = json_data[f'{option_chain_type}ExpDateMap']
+            for exp_date, strikes in exp_map.items():
                 for strike in strikes.values():
-                    opt = strike[0]
-                    expiry_date = datetime.fromtimestamp(opt["expirationDate"] / 1000.0)
-                    option_type = opt['putCall']
-                    strike_price = opt['strikePrice']
-                    # Polygon doesn't provide bidSize/askSize directly; approximate or omit
-                    bid_size = opt.get('bidSize', 1)  # Default to 1 if missing
-                    ask_size = opt.get('askSize', 1)   # Default to 1 if missing
-                    delta_val = opt['delta']
-                    total_volume = opt['totalVolume']
-                    open_interest = opt['openInterest']
+                    strike_data = strike[0]
+                    expiry_date = datetime.fromtimestamp(strike_data["expirationDate"] / 1000.0)
                     day_diff = (expiry_date - current_date).days
                     if day_diff < 0:
                         continue
-                    elif day_diff > expday_range:
+                    if day_diff > expday_range:
                         break
-                    option_premium = round(opt['bid'] * opt['multiplier'], 2)
+
+                    option_type = strike_data['putCall']
+                    strike_price = strike_data['strikePrice']
+                    bid_size = strike_data.get('bidSize', 0)  # Polygon may not provide; default to 0
+                    ask_size = strike_data.get('askSize', 0)  # Polygon may not provide; default to 0
+                    delta_val = strike_data['delta']  # Now a float from Polygon
+                    total_volume = strike_data['volume']
+                    open_interest = strike_data['openInterest']
+                    option_premium = round(strike_data['bid'] * strike_data['multiplier'], 2)
                     roi_val = round(option_premium / (strike_price * 100) * 100, 2)
-                    option_leverage = 0.0 if delta_val == 'NaN' or option_premium == 0 else round((abs(float(delta_val)) * stock_price) / option_premium, 3)
+
+                    option_leverage = 0.0 if option_premium == 0 else round((abs(float(delta_val)) * stock_price) / option_premium, 3)
                     prob_val = get_prob(stock_price, strike_price, hist_volatility, day_diff) if day_diff > 0 else 0.0
                     lower_bound, upper_bound = prob_cone(stock_price, hist_volatility, day_diff, confidence_lvl)
+
                     insert.append([ticker, expiry_date, option_type, strike_price, day_diff, delta_val, prob_val, open_interest, total_volume, option_premium, option_leverage, bid_size, ask_size, roi_val, lower_bound, upper_bound])
 
         df = pd.DataFrame(insert, columns=[col['name'] for col in base_df_columns])
@@ -118,24 +117,27 @@ def register_callbacks(app, API_KEY):
         aggregation = collections.defaultdict(lambda: collections.defaultdict(list))
         if ticker is None:
             raise PreventUpdate
-        if tab == 'price_tab_1':
+
+        if tab == 'price_tab_1':  # 1 Day
             hist_price = tos_get_price_hist(ticker, periodType='day', period=1, frequencyType='minute', frequency=1, apiKey=API_KEY)
-        elif tab == 'price_tab_2':
+        elif tab == 'price_tab_2':  # 5 Days
             hist_price = tos_get_price_hist(ticker, periodType='day', period=5, frequencyType='minute', frequency=5, apiKey=API_KEY)
-        elif tab == 'price_tab_3':
+        elif tab == 'price_tab_3':  # 1 Month
             hist_price = tos_get_price_hist(ticker, periodType='month', period=1, frequencyType='daily', frequency=1, apiKey=API_KEY)
-        elif tab == 'price_tab_4':
+        elif tab == 'price_tab_4':  # 1 Year
             hist_price = hist_data[ticker]
             if hist_price is None:
                 raise PreventUpdate
-        elif tab == 'price_tab_5':
-            hist_price = tos_get_price_hist(ticker, periodType='year', period=5, frequencyType='daily', frequency=1, apiKey=API_KEY)
+        elif tab == 'price_tab_5':  # 5 Years
+            hist_price = tos_get_price_hist(ticker, periodType='year', period=5, frequencyType='daily', frequency=1, startDate=datetime.now() - timedelta(days=5*365), apiKey=API_KEY)
+
         for candle in hist_price['candles']:
             a = aggregation[ticker]
             a['name'] = ticker
             a['mode'] = 'lines'
             a['y'].append(candle['close'])
             a['x'].append(datetime.fromtimestamp(candle['datetime'] / 1000.0))
+
         return {'layout': {'title': {'text': 'Price History'}}, 'data': [x for x in aggregation.values()]}
 
     @app.callback(
@@ -148,11 +150,13 @@ def register_callbacks(app, API_KEY):
         data = []
         if hist_data is None or quotes_data is None:
             raise PreventUpdate
+
         optionchain_df = pd.read_json(optionchain_data, orient='split')
         mkt_pressure_df = optionchain_df.filter(['Ticker', 'Exp. Date (Local)', 'Option Type', 'Exp. Days', 'Strike', 'Open Int.', 'Total Vol.'])
         mkt_pressure_df['Day'] = mkt_pressure_df['Exp. Days'].apply(lambda x: date.today() + timedelta(days=x))
         mkt_pressure_df['StrikeOpenInterest'] = mkt_pressure_df['Strike'] * mkt_pressure_df['Open Int.']
         mkt_pressure_df['StrikeTotalVolume'] = mkt_pressure_df['Strike'] * mkt_pressure_df['Total Vol.']
+
         price_df = pd.DataFrame(hist_data[ticker]['candles'])
         hist_volatility = hist_data['est_vol']
         stock_price = quotes_data[ticker]['lastPrice']
@@ -161,26 +165,30 @@ def register_callbacks(app, API_KEY):
             for i_day in range(expday_range + 1):
                 lower_bound, upper_bound = prob_cone(stock_price, hist_volatility, i_day, probability=confidence_lvl)
                 insert.append([ticker, date.today() + timedelta(days=i_day), stock_price, lower_bound, upper_bound, i_day])
+
             agg_mkt_pressure_df = mkt_pressure_df.groupby('Day').sum().reset_index()
             agg_mkt_pressure_df['MktPressOpenInterest'] = agg_mkt_pressure_df['StrikeOpenInterest'] / agg_mkt_pressure_df['Open Int.']
             agg_mkt_pressure_df['MktPressTotalVolume'] = agg_mkt_pressure_df['StrikeTotalVolume'] / agg_mkt_pressure_df['Total Vol.']
+
         elif tab == 'gbm_sim_tab':
             T = expday_range / 252
             r, q, sigma, steps, N = 0.01, 0.007, hist_volatility, 1, 1000000
             x_ls, y_ls = gbm_sim(price_df, stock_price, T, r, q, sigma, steps, N, bin_size=10)
             data.append(go.Scatter(x=x_ls, y=y_ls, name='Price Probability', mode='lines+markers', line_shape='spline'))
 
-        fig = go.Figure()
         if tab == 'prob_cone_tab':
             df = pd.DataFrame(insert, columns=['Ticker Symbol', 'Day', 'Stock Price', 'Lower Bound', 'Upper Bound', 'Days to Expiry'])
-            fig.add_trace(go.Scatter(x=df[df['Ticker Symbol'] == ticker]['Day'].squeeze(), y=df[df['Ticker Symbol'] == ticker]['Upper Bound'].squeeze(), mode='lines+markers', name=f'{ticker}: Upper Bound', line_shape='spline'))
-            fig.add_trace(go.Scatter(x=df[df['Ticker Symbol'] == ticker]['Day'].squeeze(), y=df[df['Ticker Symbol'] == ticker]['Lower Bound'].squeeze(), mode='lines+markers', name=f'{ticker}: Lower Bound', line_shape='spline'))
+            fig = go.Figure()
+            fig.add_trace(go.Scatter(x=df.loc[df['Ticker Symbol'] == ticker, 'Day'].squeeze(), y=df.loc[df['Ticker Symbol'] == ticker, 'Upper Bound'].squeeze(), mode='lines+markers', name=f'{ticker}: Upper Bound', line_shape='spline'))
+            fig.add_trace(go.Scatter(x=df.loc[df['Ticker Symbol'] == ticker, 'Day'].squeeze(), y=df.loc[df['Ticker Symbol'] == ticker, 'Lower Bound'].squeeze(), mode='lines+markers', name=f'{ticker}: Lower Bound', line_shape='spline'))
             fig.add_trace(go.Scatter(x=agg_mkt_pressure_df['Day'].squeeze(), y=agg_mkt_pressure_df['MktPressOpenInterest'].squeeze(), mode='lines+markers', name=f'{ticker}: Open Interest Pressure', line_shape='spline'))
             fig.add_trace(go.Scatter(x=agg_mkt_pressure_df['Day'].squeeze(), y=agg_mkt_pressure_df['MktPressTotalVolume'].squeeze(), mode='lines+markers', name=f'{ticker}: Total Volume Pressure', line_shape='spline'))
-            fig.update_layout(title=f'Probability Cone ({confidence_lvl*100}% Confidence)', title_x=0.5, yaxis_title='Stock Price', plot_bgcolor='rgb(256,256,256)', legend=dict(yanchor="top", y=1, xanchor="left", x=0))
-        elif tab == 'gbm_sim_tab':
+            fig.update_layout(title=f'Probability Cone ({confidence_lvl*100}% Confidence)', title_x=0.5, yaxis_title='Stock Price', plot_bgcolor='rgb(256,256,256)')
+            fig.update_layout(legend=dict(yanchor="top", y=1, xanchor="left", x=0))
+        else:
             fig = go.Figure(data=data)
             fig.update_layout(title='Probability Distribution', title_x=0.5, yaxis_title='Probability (%)', plot_bgcolor='rgb(256,256,256)')
+
         fig.update_xaxes(showgrid=True, gridcolor='LightGrey')
         fig.update_yaxes(showgrid=True, gridcolor='LightGrey')
         return fig
@@ -198,9 +206,11 @@ def register_callbacks(app, API_KEY):
         volatility_period = vol_tab_dict[tab]
         vol_est_ls = ['log_returns', 'garman_klass', 'hodges_tompkins', 'parkinson', 'rogers_satchell', 'yang_zhang']
         hist_volatility_dict = {}
+
         for vol_est in vol_est_ls:
             hist_volatility = get_hist_volatility(price_df, volatility_period, estimator=vol_est)
             hist_volatility_dict[vol_est] = hist_volatility.iloc[1:] if vol_est in ('garman_klass', 'parkinson', 'rogers_satchell') else hist_volatility
+
         hist_volatility_dict['Day'] = range(1, len(hist_volatility_dict['log_returns']) + 1)
         hist_volatility_df = pd.DataFrame(hist_volatility_dict)
         fig = go.Figure()
@@ -223,10 +233,12 @@ def register_callbacks(app, API_KEY):
         df = optionchain_df.filter(['Ticker', 'Exp. Date (Local)', 'Type', 'Exp. Days', 'Strike', 'Open Int.', 'Total Vol.'])
         expday_options = [{"label": f"Strike Date: {(datetime.now() + timedelta(days=int(days_to_exp))).date()} (Days to Expiry: {days_to_exp})", "value": days_to_exp} for days_to_exp in df['Exp. Days'].unique()]
         fig = go.Figure()
-        expday_select = max(df['Exp. Days']) if expday_graph_selection is None else expday_graph_selection
+        expday_select = expday_graph_selection if expday_graph_selection else df['Exp. Days'].max()
+
         for option_type, bar_color in [('PUT', 'indianred'), ('CALL', 'lightseagreen')]:
-            fig.add_trace(go.Scatter(x=df[(df['Type'] == option_type) & (df['Exp. Days'] == expday_select)]['Strike'].squeeze(), y=df[(df['Type'] == option_type) & (df['Exp. Days'] == expday_select)]['Total Vol.'].squeeze(), mode='lines+markers', name=f'{ticker}: Total {option_type} Volume', line_shape='spline', marker_color=bar_color))
-            fig.add_trace(go.Bar(x=df[(df['Type'] == option_type) & (df['Exp. Days'] == expday_select)]['Strike'].squeeze(), y=df[(df['Type'] == option_type) & (df['Exp. Days'] == expday_select)]['Open Int.'].squeeze(), name=f'{ticker}: Open {option_type} Interest', marker_color=bar_color, opacity=0.5))
+            fig.add_trace(go.Scatter(x=df.loc[(df['Type'] == option_type) & (df['Exp. Days'] == expday_select), 'Strike'].squeeze(), y=df.loc[(df['Type'] == option_type) & (df['Exp. Days'] == expday_select), 'Total Vol.'].squeeze(), mode='lines+markers', name=f'{ticker}: Total {option_type} Volume', line_shape='spline', marker_color=bar_color))
+            fig.add_trace(go.Bar(x=df.loc[(df['Type'] == option_type) & (df['Exp. Days'] == expday_select), 'Strike'].squeeze(), y=df.loc[(df['Type'] == option_type) & (df['Exp. Days'] == expday_select), 'Open Int.'].squeeze(), name=f'{ticker}: Open {option_type} Interest', marker_color=bar_color, opacity=0.5))
+
         fig.update_layout(title=f'Open Interest/Volume - {expday_select} days', title_x=0.5, xaxis_title='Strike Price', yaxis_title='No. of Contracts', plot_bgcolor='rgb(256,256,256)', legend=dict(yanchor="top", y=1, xanchor="right", x=1))
         return fig, expday_options
 
@@ -239,18 +251,19 @@ def register_callbacks(app, API_KEY):
         if ticker is None or optionchain_data is None:
             raise PreventUpdate
         option_chain_response = tos_get_option_chain(ticker, contractType='ALL', rangeType='ALL', apiKey=API_KEY)
-        if not option_chain_response or 'underlyingPrice' not in option_chain_response:
+        if not option_chain_response or 'error' in option_chain_response:
             raise PreventUpdate
+
         stock_price = option_chain_response['underlyingPrice']
         stock_price_110percent = stock_price * 1.1
         stock_price_90percent = stock_price * 0.9
         insert = []
-        low_call_strike, high_call_strike, low_put_strike, high_put_strike = None, None, None, None
 
+        low_call_strike, high_call_strike, low_put_strike, high_put_strike = None, None, None, None
         for option_chain_type in ['call', 'put']:
             for exp_date, strikes in option_chain_response[f'{option_chain_type}ExpDateMap'].items():
                 day_diff = int(exp_date.split(':')[1])
-                if day_diff < 28 or day_diff >= 35:
+                if not (28 <= day_diff < 35):
                     continue
                 high_strike_found = False
                 for strike in strikes.values():
@@ -273,27 +286,25 @@ def register_callbacks(app, API_KEY):
             raise PreventUpdate
 
         prevent_zero_div = lambda x, y: 0 if (y == 0 or y is None) else x / y
-        askbid_ratios = [
-            prevent_zero_div(high_call_strike_ask, high_call_strike_bid),
-            prevent_zero_div(high_put_strike_ask, high_put_strike_bid),
-            prevent_zero_div(low_call_strike_ask, low_call_strike_bid),
-            prevent_zero_div(low_put_strike_ask, low_put_strike_bid)
-        ]
-        liquidity = 'FAILED' if all(ratio > 1.25 for ratio in askbid_ratios) else 'PASSED'
+        high_call_strike_askbid = prevent_zero_div(high_call_strike_ask, high_call_strike_bid)
+        high_put_strike_askbid = prevent_zero_div(high_put_strike_ask, high_put_strike_bid)
+        low_call_strike_askbid = prevent_zero_div(low_call_strike_ask, low_call_strike_bid)
+        low_put_strike_askbid = prevent_zero_div(low_put_strike_ask, low_put_strike_bid)
+        askbid_checklist = [high_call_strike_askbid, high_put_strike_askbid, low_call_strike_askbid, low_put_strike_askbid]
+        liquidity = 'FAILED' if all(askbid > 1.25 for askbid in askbid_checklist) else 'PASSED'
 
-        midpoints = [
-            (high_call_strike_bid + high_call_strike_ask) / 2,
-            (high_put_strike_bid + high_put_strike_ask) / 2,
-            (low_call_strike_bid + low_call_strike_ask) / 2,
-            (low_put_strike_bid + low_put_strike_ask) / 2
-        ]
+        high_call_strike_midpoint = (high_call_strike_bid + high_call_strike_ask) / 2
+        high_put_strike_midpoint = (high_put_strike_bid + high_put_strike_ask) / 2
+        low_call_strike_midpoint = (low_call_strike_bid + low_call_strike_ask) / 2
+        low_put_strike_midpoint = (low_put_strike_bid + low_put_strike_ask) / 2
         call_110percent_price = low_call_strike_midpoint - (low_call_strike_midpoint - high_call_strike_midpoint) / (high_call_strike - low_call_strike) * (stock_price_110percent - low_call_strike)
         put_90percent_price = low_put_strike_midpoint + (high_put_strike_midpoint - low_put_strike_midpoint) / (high_put_strike - low_put_strike) * (stock_price_90percent - low_put_strike)
 
-        skew_category, skew = ('Put Skew', round(put_90percent_price / call_110percent_price, 3)) if put_90percent_price > call_110percent_price else ('Call Skew', round(call_110percent_price / put_90percent_price, 3))
+        skew_category = 'Put Skew' if put_90percent_price > call_110percent_price else 'Call Skew'
+        skew = round(put_90percent_price / call_110percent_price, 3) if put_90percent_price > call_110percent_price else round(call_110percent_price / put_90percent_price, 3)
         insert.append([ticker, skew_category, skew, liquidity])
-        df = pd.DataFrame(insert, columns=[col['id'] for col in ticker_df_columns])
 
+        df = pd.DataFrame(insert, columns=[col['id'] for col in ticker_df_columns])
         dff = df.sort_values([col['column_id'] for col in sort_by], ascending=[col['direction'] == 'asc' for col in sort_by], inplace=False) if sort_by else df
         return dff.iloc[page_current * page_size:(page_current + 1) * page_size].to_dict('records')
 
@@ -306,12 +317,12 @@ def register_callbacks(app, API_KEY):
         if hist_data is None or optionchain_data is None:
             raise PreventUpdate
         base_df = pd.read_json(optionchain_data, convert_dates=['Exp. Date (Local)'], orient='split')
-        df = base_df[(base_df['ROI'] >= roi_selection) & (base_df['Delta'].abs() <= delta_range)]
-        df = df[((df['Type'] == 'CALL') & (df['Strike'] >= df['Upper CI'])) | ((df['Type'] == 'PUT') & (df['Strike'] <= df['Lower CI']))]
+        df = base_df.loc[(base_df['ROI'] >= roi_selection) & (base_df['Delta'].abs() <= delta_range)]
+        df = df.loc[((df['Type'] == 'CALL') & (df['Strike'] >= df['Upper CI'])) | ((df['Type'] == 'PUT') & (df['Strike'] <= df['Lower CI']))]
         df = df.drop(columns=['Upper CI', 'Lower CI'])
-        df['ROI'] = df['ROI'].map('{:,.3f}'.format)
-        df['Leverage'] = df['Leverage'].map('{:,.3f}'.format)
-        df['Delta'] = df['Delta'].map('{:,.3f}'.format)
+        df['ROI'] = df['ROI'].map('{:.3f}'.format)
+        df['Leverage'] = df['Leverage'].map('{:.3f}'.format)
+        df['Delta'] = df['Delta'].map('{:.3f}'.format)
         df.columns = [col['id'] for col in option_chain_df_columns]
         dff = df.sort_values([col['column_id'] for col in sort_by], ascending=[col['direction'] == 'asc' for col in sort_by], inplace=False) if sort_by else df
         return dff.iloc[page_current * page_size:(page_current + 1) * page_size].to_dict('records')

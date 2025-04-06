@@ -1,136 +1,139 @@
-import requests
+from polygon import RESTClient
 import datetime
 
-# TOS API call to get close 1Y price history of specified ticker symbol, outputs list of close prices 
-def tos_get_price_hist(ticker_symbol:str, period=1, periodType='year', frequencyType='daily', frequency=1, startDate=None, endDate=None, apiKey=None):
-
+# Initialize Polygon client (assumes API key is passed or set in environment)
+def get_polygon_client(apiKey=None):
     if apiKey is None:
-        raise ValueError("TOS Option API Key is not defined.")
+        raise ValueError("Polygon API Key is not defined.")
+    return RESTClient(api_key=apiKey)
 
-    # Price History
-    endpoint = f'https://api.tdameritrade.com/v1/marketdata/{ticker_symbol}/pricehistory'
+# Polygon API call to get historical price data (OHLCV) for a ticker
+def tos_get_price_hist(ticker_symbol: str, period=1, periodType='year', frequencyType='daily', frequency=1, startDate=None, endDate=None, apiKey=None):
+    client = get_polygon_client(apiKey)
+    
+    # Map TOS periodType and frequencyType to Polygon timespan
+    timespan_map = {
+        'day': 'day' if frequencyType == 'daily' else 'minute',
+        'month': 'month',
+        'year': 'year',
+        'ytd': 'day'
+    }
+    timespan = timespan_map.get(periodType.lower(), 'day')
+    multiplier = frequency
 
-    if isinstance(startDate,datetime.datetime) and isinstance(endDate,datetime.datetime):
-        startDate = startDate.timestamp() * 1000 # convert date time object into milliseconds before epoch format
-        endDate = endDate.timestamp() * 1000  
+    # Convert dates to ISO format if provided
+    if isinstance(startDate, datetime.datetime):
+        startDate = startDate.strftime('%Y-%m-%d')
+    if isinstance(endDate, datetime.datetime):
+        endDate = endDate.strftime('%Y-%m-%d')
 
-    payload = {'apikey':apiKey, 
-                'periodType':periodType,                   # Values: day (default), month, year, or ytd (year to date)
-                'period':period,                           # Values: (periodType = 'day') 1, 2, 3, 4, 5, 10* (periodType = 'month') 1*, 2, 3, 6 (periodType = 'year') 1*, 2, 3, 5, 10, 15, 20 (periodType = 'ytd') 1*
-                'frequencyType':frequencyType,             # Values: (periodType = 'day') minute*, (periodType = 'month') daily, weekly*, (periodType = 'year') daily, weekly, monthly*, (periodType = 'ytd') daily, weekly*
-                'frequency':frequency,                     # Values: (frequencyType = 'minute') 1*, 5, 10, 15, 30, (frequencyType = 'daily') 1*, (frequencyType = 'weekly') 1*, (frequencyType = 'monthly') 1*
-                'endDate':startDate,                       # in milliseconds since epoch
-                'startDate':endDate,                       # in milliseconds since epoch
-                'needExtendedHoursData': True
-                }
+    # Fetch aggregates (bars)
+    aggs = client.get_aggs(
+        ticker=ticker_symbol,
+        multiplier=multiplier,
+        timespan=timespan,
+        from_=startDate or (datetime.datetime.now() - datetime.timedelta(days=365)).strftime('%Y-%m-%d'),
+        to=endDate or datetime.datetime.now().strftime('%Y-%m-%d'),
+        limit=50000
+    )
 
-    # Make a request
-    content = requests.get(url = endpoint, params = payload)
-
-    return content.json()
-
-# TOS API call to get real-time quote data for multiple tickers
-def tos_get_quotes(ticker_symbols:str, apiKey=None): 
-
-    if apiKey is None:
-        raise ValueError("TOS Option API Key is not defined.")
-
-    # Get Quotes
-    endpoint = 'https://api.tdameritrade.com/v1/marketdata/quotes'
-
-    payload = {
-        'apikey':apiKey,
-        'symbol':ticker_symbols
+    # Format response to match TOS structure
+    return {
+        "candles": [
+            {
+                "open": agg.open,
+                "high": agg.high,
+                "low": agg.low,
+                "close": agg.close,
+                "volume": agg.volume,
+                "datetime": agg.timestamp
+            } for agg in aggs
+        ]
     }
 
-     # Make a request
-    content = requests.get(url = endpoint, params = payload)
-
-    return content.json()
-
-# TOS API call to search or retrieve instrument data, including fundamental data.
-def tos_search(symbol:str, projection='desc-search', apiKey=None): 
-
-    if apiKey is None:
-        raise ValueError("TOS Option API Key is not defined.")
-
-    # Get Quotes
-    endpoint = 'https://api.tdameritrade.com/v1/instruments'
-
-    payload = {
-        'apikey':apiKey,
-        'symbol':symbol,
-        'projection': projection
+# Polygon API call to get real-time quote data for a ticker
+def tos_get_quotes(ticker_symbols: str, apiKey=None):
+    client = get_polygon_client(apiKey)
+    quote = client.get_last_quote(ticker_symbols)
+    
+    # Format to match TOS structure (single ticker for simplicity)
+    return {
+        ticker_symbols: {
+            "lastPrice": quote.last_price,
+            "bidPrice": quote.bid_price,
+            "askPrice": quote.ask_price
+        }
     }
 
-     # Make a request
-    content = requests.get(url = endpoint, params = payload)
+# Polygon API call to search tickers
+def tos_search(symbol: str, projection='desc-search', apiKey=None):
+    client = get_polygon_client(apiKey)
+    tickers = client.list_tickers(search=symbol, limit=100)
+    
+    # Format to match TOS structure
+    return {
+        str(i): {
+            "symbol": ticker.ticker,
+            "description": ticker.name
+        } for i, ticker in enumerate(tickers)
+    }
 
-    return content.json()
-
-# Makes API call and returns a list of historical prices of the specified ticker
-def tos_load_price_hist(ticker_symbol:str, period=1, startDate=None, endDate=None, apiKey=None) -> list:
-
-    if apiKey is None:
-            raise ValueError("TOS Option API Key is not defined.")
-
-    price_ls = []
-
+# Polygon API call to get historical close prices as a list
+def tos_load_price_hist(ticker_symbol: str, period=1, startDate=None, endDate=None, apiKey=None) -> list:
     data = tos_get_price_hist(ticker_symbol, period=period, startDate=startDate, endDate=endDate, apiKey=apiKey)
+    return [candle['close'] for candle in data['candles']]
 
-    for candle in data['candles']:
-        price_ls.append(candle['close'])
-
-    return price_ls
-
-# TOS API call to get OTM option type (Call/Put)
-def tos_get_option_chain(ticker_symbol:str, contractType='ALL', rangeType='OTM', apiKey=None):
-
-    if apiKey is None:
-        raise ValueError("TOS Option API Key is not defined.")
-
-    # Price History
-    endpoint = 'https://api.tdameritrade.com/v1/marketdata/chains'
-
-    payload = {'apikey':apiKey, 
-                'symbol':ticker_symbol,
-                'contractType':contractType,               # Values: CALL, PUT, ALL*
-                'strikeCount': None,
-                'strategy':'SINGLE',                        # Values: SINGLE, ANALYTICAL, COVERED, VERTICAL, CALENDAR, STRANGLE, STRADDLE, BUTTERFLY, CONDOR, DIAGONAL, COLLAR, ROLL
-                'range':rangeType,                             # Values: ITM, NTM (Near-the-money), OTM, SAK (Strikes Above Market), SBK (Strikes Below Market), SNK (Strikes Near Market), ALL (All Strikes)
-                'fromDate':None,                           # Values: Valid ISO-8601 formats are: yyyy-MM-dd and yyyy-MM-dd'T'HH:mm:ssz.'
-                'toDate':None,                             # Values: Valid ISO-8601 formats are: yyyy-MM-dd and yyyy-MM-dd'T'HH:mm:ssz.'
-                'expMonth':'ALL',                          # Values: (frequencyType = 'minute') 1*, 5, 10, 15, 30, (frequencyType = 'daily') 1*, (frequencyType = 'weekly') 1*, (frequencyType = 'monthly') 1*
-                'optionType':'S'                           # Values: S (Standard contracts), NS (Non-standard contracts), ALL (All contracts)
-                }
-
-    # Make a request
-    content = requests.get(url = endpoint, params = payload)
-
-    return content.json()    
-
-# TOS API call to get fundamental data using Ticker symbol 
-def tos_get_fundamental_data(ticker_symbol:str, apiKey=None, search='fundamental', raw=False):
-
-    if apiKey is None:
-        raise ValueError("TOS Option API Key is not defined.")
-
-    # Search instruments
-    endpoint = 'https://api.tdameritrade.com/v1/instruments'
-
-    payload = {'apikey':apiKey, 
-                'symbol':ticker_symbol,
-                'projection':search,               # Values: symbol-search, symbol-regex, desc-search, desc-regex, fundamental
-                }
+# Polygon API call to get option chain data
+def tos_get_option_chain(ticker_symbol: str, contractType='ALL', rangeType='OTM', apiKey=None):
+    client = get_polygon_client(apiKey)
     
-    # Make a request
-    content = requests.get(url = endpoint, params = payload)
+    # Fetch options chain snapshot
+    options = []
+    for opt in client.list_snapshot_options_chain(ticker_symbol, params={"contract_type": contractType.lower() if contractType != 'ALL' else None}):
+        options.append({
+            "putCall": opt.contract_type.upper(),
+            "strikePrice": opt.strike_price,
+            "expirationDate": int(datetime.datetime.strptime(opt.expiration_date, '%Y-%m-%d').timestamp() * 1000),  # Convert to ms
+            "bid": opt.bid or 0,
+            "ask": opt.ask or 0,
+            "lastPrice": opt.last_trade.price if opt.last_trade else 0,
+            "openInterest": opt.open_interest,
+            "volume": opt.day.volume,
+            "delta": opt.greeks.delta if opt.greeks else 'NaN',  # Polygon provides greeks
+            "multiplier": 100  # Standard multiplier
+        })
 
-    if raw:
-        return content
-    else:
-        return content.json() 
+    # Format to match TOS structure
+    call_exp_date_map = {}
+    put_exp_date_map = {}
+    for opt in options:
+        exp_date = f"{datetime.datetime.fromtimestamp(opt['expirationDate'] / 1000).strftime('%Y-%m-%d')}:{int((opt['expirationDate'] / 1000 - datetime.datetime.now().timestamp()) / 86400)}"
+        strike_key = str(opt['strikePrice'])
+        if opt['putCall'] == 'CALL':
+            call_exp_date_map.setdefault(exp_date, {})[strike_key] = [opt]
+        else:
+            put_exp_date_map.setdefault(exp_date, {})[strike_key] = [opt]
+
+    return {
+        "underlyingPrice": client.get_last_quote(ticker_symbol).last_price,
+        "callExpDateMap": call_exp_date_map,
+        "putExpDateMap": put_exp_date_map
+    }
+
+# Polygon API call to get fundamental data (limited compared to TOS)
+def tos_get_fundamental_data(ticker_symbol: str, apiKey=None, search='fundamental', raw=False):
+    client = get_polygon_client(apiKey)
+    details = client.get_ticker_details(ticker_symbol)
     
-
-
-
+    # Format to match TOS structure (simplified)
+    data = {
+        ticker_symbol: {
+            "fundamental": {
+                "symbol": details.ticker,
+                "description": details.name,
+                "marketCap": details.market_cap,
+                "sharesOutstanding": details.share_class_shares_outstanding
+            }
+        }
+    }
+    return data if not raw else data  # Raw flag preserved but less relevant here

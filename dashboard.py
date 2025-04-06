@@ -16,7 +16,7 @@ parser.add_argument("--docker", help="Change the default server host to 0.0.0.0"
 args = parser.parse_args()
 
 # API credentials 
-API_KEY = os.environ.get('TOS_API_KEY')
+API_KEY = os.environ.get('POLYGON_API_KEY')
 
 # ------------------------------------------------------------------------------
 # App layout

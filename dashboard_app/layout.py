@@ -1,8 +1,8 @@
-import dash_table
-from dash_table.Format import Format, Scheme
-from dash_table import FormatTemplate
-import dash_core_components as dcc
-import dash_html_components as html
+from dash import dash_table
+from dash.dash_table.Format import Format, Scheme
+from dash.dash_table import FormatTemplate
+from dash import dcc
+from dash import html
 import dash_bootstrap_components as dbc
 
 # Data Table Properties
@@ -72,13 +72,13 @@ app_layout = html.Div([
         [
             html.A(
                 # Use row and col to control vertical alignment of logo / brand
-                dbc.Row(
-                    [
-                        dbc.Col(dbc.NavbarBrand("TOS Options Wheel Dashboard", className="ml-2")),
-                    ],
-                    align="center",
-                    no_gutters=True,
-                ),
+                    dbc.Row(
+                        [
+                            dbc.Col(dbc.NavbarBrand("TOS Options Wheel Dashboard", className="ml-2")),
+                        ],
+                        align="center",
+                        className="g-0",  # Bootstrap 4+ class to remove gutters
+                    ),
                 href="#",
             ),
         ],

@@ -44,12 +44,20 @@ def register_callbacks(app, API_KEY):
         [State('memory-ticker', 'value'), State('memory-vol-period', 'value'), State('memory-volest-type', 'value')]
     )
     def get_historical_prices(n_clicks, ticker, volatility_period, vol_est_type):
-        if ticker is None:
+        if not ticker or not isinstance(ticker, str):
+            print(f"Invalid ticker: {ticker}")
             raise PreventUpdate
+        print(f"Fetching history for ticker: {ticker}, period: {volatility_period}, estimator: {vol_est_type}")
         hist_data = tos_get_price_hist(ticker, apiKey=API_KEY)
         json_data = {ticker: hist_data}
         price_df = pd.DataFrame(hist_data['candles'])
-        json_data['est_vol'] = get_hist_volatility(price_df, volatility_period, estimator=vol_est_type).iloc[-1]
+        if price_df.empty or 'close' not in price_df.columns:
+            print(f"No valid historical data for {ticker}")
+            json_data['est_vol'] = 0
+        else:
+            vol_series = get_hist_volatility(price_df, volatility_period, estimator=vol_est_type)
+            json_data['est_vol'] = vol_series.iloc[-1] if not vol_series.empty else 0
+        print(f"Returning hist_data with {len(hist_data['candles'])} candles, est_vol: {json_data.get('est_vol')}")
         return json_data
 
     @app.callback(
@@ -68,13 +76,17 @@ def register_callbacks(app, API_KEY):
         [State('memory-ticker', 'value'), State('memory-expdays', 'value'), State('memory-confidence', 'value')]
     )
     def get_option_chain_all(n_clicks, hist_data, quotes_data, ticker, expday_range, confidence_lvl):
-        if ticker is None:
+        if not ticker or not hist_data or not hist_data.get(ticker):
+            print(f"Skipping get_option_chain_all: ticker={ticker}, hist_data={hist_data}")
             raise PreventUpdate
+        print(f"Fetching options chain for {ticker}, expday_range={expday_range}")
         json_data = tos_get_option_chain(ticker, contractType='ALL', rangeType='ALL', apiKey=API_KEY)
+        print(f"Options chain data: {json_data}")
+        
         insert = []
         current_date = datetime.now()
         price_df = pd.DataFrame(hist_data[ticker]['candles'])
-        hist_volatility = hist_data['est_vol']
+        hist_volatility = hist_data.get('est_vol', 0)
         stock_price = quotes_data[ticker]['lastPrice']
 
         for option_chain_type in ['call', 'put']:
@@ -91,15 +103,20 @@ def register_callbacks(app, API_KEY):
 
                     option_type = strike_data['putCall']
                     strike_price = strike_data['strikePrice']
-                    bid_size = strike_data.get('bidSize', 0)  # Polygon may not provide; default to 0
-                    ask_size = strike_data.get('askSize', 0)  # Polygon may not provide; default to 0
-                    delta_val = strike_data['delta']  # Now a float from Polygon
+                    bid_size = strike_data.get('bidSize', 0)
+                    ask_size = strike_data.get('askSize', 0)
+                    delta_val = strike_data['delta']
                     total_volume = strike_data['volume']
                     open_interest = strike_data['openInterest']
                     option_premium = round(strike_data['bid'] * strike_data['multiplier'], 2)
                     roi_val = round(option_premium / (strike_price * 100) * 100, 2)
 
-                    option_leverage = 0.0 if option_premium == 0 else round((abs(float(delta_val)) * stock_price) / option_premium, 3)
+                    # Handle 'NaN' or None delta_val
+                    if delta_val == 'NaN' or delta_val is None:
+                        option_leverage = 0.0
+                    else:
+                        option_leverage = 0.0 if option_premium == 0 else round((abs(float(delta_val)) * stock_price) / option_premium, 3)
+                    
                     prob_val = get_prob(stock_price, strike_price, hist_volatility, day_diff) if day_diff > 0 else 0.0
                     lower_bound, upper_bound = prob_cone(stock_price, hist_volatility, day_diff, confidence_lvl)
 
@@ -146,19 +163,20 @@ def register_callbacks(app, API_KEY):
         [State('memory-ticker', 'value'), State('memory-expdays', 'value'), State('memory-confidence', 'value')]
     )
     def on_data_set_prob_cone(optionchain_data, hist_data, quotes_data, tab, ticker, expday_range, confidence_lvl):
-        insert = []
-        data = []
-        if hist_data is None or quotes_data is None:
+        if not optionchain_data or not hist_data or not quotes_data:
+            print(f"Skipping on_data_set_prob_cone: optionchain_data={optionchain_data}, hist_data={hist_data}, quotes_data={quotes_data}")
             raise PreventUpdate
 
-        optionchain_df = pd.read_json(optionchain_data, orient='split')
+        insert = []
+        data = []
+        optionchain_df = pd.read_json(StringIO(optionchain_data), orient='split')  # Fix FutureWarning
         mkt_pressure_df = optionchain_df.filter(['Ticker', 'Exp. Date (Local)', 'Option Type', 'Exp. Days', 'Strike', 'Open Int.', 'Total Vol.'])
         mkt_pressure_df['Day'] = mkt_pressure_df['Exp. Days'].apply(lambda x: date.today() + timedelta(days=x))
         mkt_pressure_df['StrikeOpenInterest'] = mkt_pressure_df['Strike'] * mkt_pressure_df['Open Int.']
         mkt_pressure_df['StrikeTotalVolume'] = mkt_pressure_df['Strike'] * mkt_pressure_df['Total Vol.']
 
         price_df = pd.DataFrame(hist_data[ticker]['candles'])
-        hist_volatility = hist_data['est_vol']
+        hist_volatility = hist_data.get('est_vol', 0)
         stock_price = quotes_data[ticker]['lastPrice']
 
         if tab == 'prob_cone_tab':

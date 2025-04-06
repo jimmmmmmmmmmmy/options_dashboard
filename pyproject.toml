@@ -1,0 +1,32 @@
+[tool.poetry]
+name = "tos-options-dashboard"
+version = "0.1.0"
+description = "An interactive dashboard to analyze stock options using Polygon API"
+authors = ["Bernard Cheng <your.email@example.com>"]
+license = "MIT"
+readme = "README.md"
+packages = [
+    { include = "dashboard_app" },
+    { include = "lib" },
+]
+
+[tool.poetry.dependencies]
+python = "^3.13"
+dash = "^2.18.1"
+dash-bootstrap-components = "^1.6.0"
+pandas = "^2.2.3"
+plotly = "^5.24.1"
+numpy = "^2.1.2"
+scipy = "^1.14.1"
+polygon-api-client = "^1.14.4"
+matplotlib = "^3.9.2"  # Add this line
+polygon = "^1.2.6"
+
+[tool.poetry.group.dev.dependencies]
+black = "^24.0.0"
+mypy = "^1.0.0"
+pytest = "^7.0.0"
+
+[build-system]
+requires = ["poetry-core>=1.0.0"]
+build-backend = "poetry.core.masonry.api"
